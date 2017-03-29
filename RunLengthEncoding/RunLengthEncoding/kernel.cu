@@ -7,7 +7,7 @@
 #include <math.h>
 
 #include "output.h"
-cudaError_t runLengthEncoding(int *outText, int *outAmount, int *temp, const int *in, unsigned int size);
+cudaError_t runLengthEncoding(int **outText, int **outAmount, int **temp, int **in, unsigned int size, int *outSize);
 
 __global__ void prefixSum(int *tmpArr, const int *text, int size)
 {
@@ -32,25 +32,26 @@ __global__ void prefixSum(int *tmpArr, const int *text, int size)
 	}
 
 }
-__global__ void encoding(int *outamount, int *outtext, int *prefixSum, const int *text, int outSize, int inSize)
+__global__ void encoding(int *outAmount, int *outText, int *prefixSum, const int *text, int outSize, int inSize)
 {
 	int i = threadIdx.x;
 	if(i == 0 || prefixSum[i] > prefixSum[i - 1])
 	{
-		outtext[prefixSum[i] - 1] = text[i];
-		outamount[prefixSum[i] - 1] = i;
+		int index = prefixSum[i] - 1;
+		outText[index] = text[i];
+		outAmount[index] = i;
 		__syncthreads();
 		int amount = 0;
 		if(prefixSum[i] < outSize)
 		{
-			amount = outamount[prefixSum[i]] - outamount[prefixSum[i] - 1];
+			amount = outAmount[prefixSum[i]] - outAmount[index];
 		}
 		else
 		{
-			amount = inSize - outamount[prefixSum[i] - 1]; 
+			amount = inSize - outAmount[index]; 
 		}
 		__syncthreads();
-		outamount[prefixSum[i] - 1] = amount;
+		outAmount[index] = amount;
 	}
 }
 
@@ -63,24 +64,55 @@ void printArray(char *msg, int *arr, int size)
 	}
 	putchar('\n');
 }
+
+int initializeArray(int **arr, int size, bool fillRandom)
+{
+	*arr = (int*)malloc(size * sizeof(int));
+
+	if(*arr == NULL)
+	{
+		return 1;
+	}
+	if(fillRandom)
+	{
+		srand(NULL);
+		for(int i = 0; i < size; i++)
+		{
+			(*arr)[i] = 5;
+		}
+	}
+	else
+	{
+		for(int i = 0; i < size; i++)
+		{
+			(*arr)[i] = 0;
+		}
+	}
+	return 0;
+}
+
 int main()
 {
-    const int arraySize = 16;
-    const int input[arraySize] = { 1, 1, 1, 4, 4, 4, 4, 5, 5, 5, 6, 1, 1, 2, 2, 3 };
-	int temp[arraySize] = { 0 };
+    int arraySize = 64;
+    int *input = 0;
+	int *prefix = 0;
 	//output out = {0, 0};
-	int outText[7] = {0, 0, 0, 0, 0, 0, 0}, outAmount[7] = {0, 0, 0, 0, 0, 0, 0};
-    // Add vectors in parallel.
-	cudaError_t cudaStatus = runLengthEncoding(outText, outAmount, temp, input, arraySize);
+	int *outText = 0, *outAmount = 0;
+	int outSize = 0;
+	int *pOutSize = &outSize;
+	if(initializeArray(&input, arraySize, true)) { printf("Error malloc input\n"); return; }
+	if(initializeArray(&prefix, arraySize, false)) { printf("Error malloc input\n"); return; }
+	printArray("Input: ", input, arraySize);
+	cudaError_t cudaStatus = runLengthEncoding(&outText, &outAmount, &prefix, &input, arraySize, pOutSize);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "addWithCuda failed!");
         return 1;
     }
 	
-	printArray("Input: ", (int*)input, arraySize);
-	printArray("Prefix sum: ", temp, arraySize);
-	printArray("Values in input: ", outText, 7);
-	printArray("Amount of consecutive values: ", outAmount, 7);
+	printArray("Input: ", input, arraySize);
+	printArray("Prefix sum: ", prefix, arraySize);
+	printArray("Values in input: ", outText, outSize);
+	printArray("Amount of consecutive values: ", outAmount, outSize);
 
     // cudaDeviceReset must be called before exiting in order for profiling and
     // tracing tools such as Nsight and Visual Profiler to show complete traces.
@@ -89,14 +121,16 @@ int main()
         fprintf(stderr, "cudaDeviceReset failed!");
         return 1;
     }
-	//free(outText);
-	//free(outAmount);
+	free(input);
+	free(prefix);
+	free(outText);
+	free(outAmount);
 	//outputDispose(out);
     return 0;
 }
 
 // Helper function for using CUDA to add vectors in parallel.
-cudaError_t runLengthEncoding(int *outText, int *outAmount, int *temp, const int *in, unsigned int size)
+cudaError_t runLengthEncoding(int **outText, int **outAmount, int **temp, int **in, unsigned int size, int *outSize)
 {
     int *dev_in = 0;
 	int *dev_temp = 0;
@@ -124,20 +158,20 @@ cudaError_t runLengthEncoding(int *outText, int *outAmount, int *temp, const int
     }
 
     // Copy input vectors from host memory to GPU buffers.
-    cudaStatus = cudaMemcpy(dev_in, in, size * sizeof(int), cudaMemcpyHostToDevice);
+    cudaStatus = cudaMemcpy(dev_in, *in, size * sizeof(int), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
     }
 
-    cudaStatus = cudaMemcpy(dev_temp, temp, size * sizeof(int), cudaMemcpyHostToDevice);
+    cudaStatus = cudaMemcpy(dev_temp, *temp, size * sizeof(int), cudaMemcpyHostToDevice);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
     }
 
     // Launch a kernel on the GPU with one thread for each element.
-    prefixSum<<<1, size>>>(dev_temp, dev_in, size);
+    prefixSum<<<1, 64>>>(dev_temp, dev_in, size);
     // Check for any errors launching the kernel
     cudaStatus = cudaGetLastError();
     if (cudaStatus != cudaSuccess) {
@@ -154,29 +188,29 @@ cudaError_t runLengthEncoding(int *outText, int *outAmount, int *temp, const int
     }
 
      //Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(temp, dev_temp, size * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaStatus = cudaMemcpy(*temp, dev_temp, size * sizeof(int), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
     }
-	//printArray(temp, size);
+	printArray("Temp: ", *temp, size);
 	//printArray(dev_temp, size);
 	//find size of output array
-	//int outputSize = temp[size - 1];
-	//outputInit(out, outputSize);
-
-
-	cudaStatus = cudaMalloc((void**)&dev_amount, size * sizeof(int));
+	int outputSize = (*temp)[size - 1];
+	*outSize = outputSize;
+	if(initializeArray(outText, outputSize, false)) { printf("Error malloc outText\n"); goto Error; }
+	if(initializeArray(outAmount, outputSize, false)) { printf("Error malloc outAmount\n"); goto Error; }
+	cudaStatus = cudaMalloc((void**)&dev_amount, outputSize * sizeof(int));
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc failed!");
         goto Error;
     }
-	cudaStatus = cudaMalloc((void**)&dev_text, size * sizeof(int));
+	cudaStatus = cudaMalloc((void**)&dev_text, outputSize * sizeof(int));
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc failed!");
         goto Error;
     }
-	encoding<<<1, size>>>(dev_amount, dev_text, dev_temp, dev_in, 7, size); 
+	encoding<<<1, size>>>(dev_amount, dev_text, dev_temp, dev_in, outputSize, size); 
 	cudaStatus = cudaGetLastError();
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "encoding launch failed: %s\n", cudaGetErrorString(cudaStatus));
@@ -189,12 +223,12 @@ cudaError_t runLengthEncoding(int *outText, int *outAmount, int *temp, const int
         goto Error;
     }
 
-	cudaStatus = cudaMemcpy(outAmount, dev_amount, 7 * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaStatus = cudaMemcpy(*outAmount, dev_amount, outputSize * sizeof(int), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
     }
-	cudaStatus = cudaMemcpy(outText, dev_text, 7 * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaStatus = cudaMemcpy(*outText, dev_text, outputSize * sizeof(int), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;

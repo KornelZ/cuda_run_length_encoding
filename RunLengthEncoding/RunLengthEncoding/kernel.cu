@@ -7,8 +7,13 @@
 #include <math.h>
 
 #include "output.h"
-cudaError_t runLengthEncoding(int **outText, int **outAmount, int **temp, int **in, unsigned int size, int *outSize);
 
+#define INPUT_SIZE 64
+
+cudaError_t runLengthEncoding(int **outText, int **outAmount, int **temp, int **in, unsigned int size, int *outSize);
+//example input: a, b, b, c, c, c, d, e, e
+//flags:		 1, 1, 0, 1, 0, 0, 1, 1, 0
+//prefix sum:    1, 2, 2, 3, 3, 3, 4, 5, 5
 __global__ void prefixSum(int *tmpArr, const int *text, int size)
 {
 	int i = threadIdx.x, logSize = logf(size);
@@ -26,12 +31,17 @@ __global__ void prefixSum(int *tmpArr, const int *text, int size)
 		{
 			val = tmpArr[i] + tmpArr[i + offset];
 		}
-
-		__syncthreads();
 		tmpArr[i + offset] = val;
 	}
 
 }
+//i:             0, 1, 2, 3, 4, 5, 6, 7, 8
+//example input: a, b, b, c, c, c, d, e, e
+//prefix sum:    1, 2, 2, 3, 3, 3, 4, 5, 5
+//index:         0, 1, -, 2, -, -, 3, 4, -
+//outText:       a, b, c, d, e
+//Amount I:      0, 1, 3, 6, 7 --> 1 - 0, 3 - 1, 6 - 3, 7 - 6, (size) - 7
+//Amount II:     1, 2, 3, 1, 2 --> 1,     2,   , 3    , 1    , 2
 __global__ void encoding(int *outAmount, int *outText, int *prefixSum, const int *text, int outSize, int inSize)
 {
 	int i = threadIdx.x;
@@ -78,7 +88,7 @@ int initializeArray(int **arr, int size, bool fillRandom)
 		srand(NULL);
 		for(int i = 0; i < size; i++)
 		{
-			(*arr)[i] = 5;
+			(*arr)[i] = rand() % 5;
 		}
 	}
 	else
@@ -91,18 +101,40 @@ int initializeArray(int **arr, int size, bool fillRandom)
 	return 0;
 }
 
+void checkOutput(int *input, int *outText, int *outAmount, int outputSize)
+{
+	for(int i = 0, j = 0; i < outputSize && j < INPUT_SIZE; i++)
+	{
+		if(input[j] == outText[i])
+		{
+			int count = j + outAmount[i];
+			while(j < count)
+			{
+				if(input[j] != outText[i])
+				{
+					printf("Error at %d in outAmount\n", i);
+				}
+				j++;
+			}
+		}
+		else
+		{
+			printf("Error at %d in outText\n", i);
+		}
+	}
+}
+
 int main()
 {
-    int arraySize = 64;
+	int arraySize = INPUT_SIZE;
     int *input = 0;
 	int *prefix = 0;
-	//output out = {0, 0};
+
 	int *outText = 0, *outAmount = 0;
 	int outSize = 0;
 	int *pOutSize = &outSize;
 	if(initializeArray(&input, arraySize, true)) { printf("Error malloc input\n"); return; }
 	if(initializeArray(&prefix, arraySize, false)) { printf("Error malloc input\n"); return; }
-	printArray("Input: ", input, arraySize);
 	cudaError_t cudaStatus = runLengthEncoding(&outText, &outAmount, &prefix, &input, arraySize, pOutSize);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "addWithCuda failed!");
@@ -113,7 +145,7 @@ int main()
 	printArray("Prefix sum: ", prefix, arraySize);
 	printArray("Values in input: ", outText, outSize);
 	printArray("Amount of consecutive values: ", outAmount, outSize);
-
+	checkOutput(input, outText, outAmount, outSize);
     // cudaDeviceReset must be called before exiting in order for profiling and
     // tracing tools such as Nsight and Visual Profiler to show complete traces.
     cudaStatus = cudaDeviceReset();
@@ -125,7 +157,7 @@ int main()
 	free(prefix);
 	free(outText);
 	free(outAmount);
-	//outputDispose(out);
+
     return 0;
 }
 
@@ -193,13 +225,12 @@ cudaError_t runLengthEncoding(int **outText, int **outAmount, int **temp, int **
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
     }
-	printArray("Temp: ", *temp, size);
-	//printArray(dev_temp, size);
 	//find size of output array
 	int outputSize = (*temp)[size - 1];
 	*outSize = outputSize;
 	if(initializeArray(outText, outputSize, false)) { printf("Error malloc outText\n"); goto Error; }
 	if(initializeArray(outAmount, outputSize, false)) { printf("Error malloc outAmount\n"); goto Error; }
+
 	cudaStatus = cudaMalloc((void**)&dev_amount, outputSize * sizeof(int));
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc failed!");
